@@ -1,0 +1,189 @@
+name: Validate OpenSpec Proposals
+
+on:
+  workflow_call:
+    inputs:
+      proposals_dir:
+        description: 'Path to proposals directory'
+        required: false
+        type: string
+        default: 'docs/proposals'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate OpenSpec proposals
+        env:
+          PROPOSALS_DIR: ${{ inputs.proposals_dir }}
+        run: |
+          set -euo pipefail
+
+          ERRORS=0
+          CHECKED=0
+
+          # Required sections (## headings) every proposal must have
+          REQUIRED_SECTIONS=(
+            "Summary"
+            "Motivation"
+            "Detailed Design"
+            "Integration Points"
+            "Testing Strategy"
+            "Migration / Rollback"
+            "References"
+          )
+
+          REQUIRED_META=(
+            "Phase:"
+            "Specs Affected:"
+            "Dependencies:"
+          )
+
+          error() {
+            echo "::error file=$CURRENT_FILE::$1"
+            ERRORS=$((ERRORS + 1))
+          }
+
+          warn() {
+            echo "::warning file=$CURRENT_FILE::$1"
+          }
+
+          validate_proposal() {
+            local file="$1"
+            local filename
+            filename=$(basename "$file")
+            CURRENT_FILE="$file"
+
+            echo "Checking $filename..."
+
+            if [[ "$filename" == "TEMPLATE.md" ]]; then
+              echo "  Skipped (template)"
+              return
+            fi
+
+            CHECKED=$((CHECKED + 1))
+
+            # Check title line
+            if ! head -1 "$file" | grep -qE '^# OpenSpec Proposal: `.+`'; then
+              error "Missing or malformed title. Expected: # OpenSpec Proposal: \`proposal-name\`"
+            fi
+
+            # Check required metadata
+            for meta in "${REQUIRED_META[@]}"; do
+              if ! grep -qF "**${meta}**" "$file"; then
+                error "Missing metadata field: ${meta}"
+              fi
+            done
+
+            # Extract metadata values (portable — no grep -P)
+            local phase specs deps
+            phase=$(sed -n 's/^\*\*Phase:\*\* *//p' "$file" | head -1)
+            specs=$(sed -n 's/^\*\*Specs Affected:\*\* *//p' "$file" | head -1)
+            deps=$(sed -n 's/^\*\*Dependencies:\*\* *//p' "$file" | head -1)
+
+            if [[ -z "$phase" || "$phase" == "{phase}" ]]; then
+              error "Phase field is empty or placeholder"
+            fi
+
+            if [[ -z "$specs" || "$specs" == "{specs}" ]]; then
+              error "Specs Affected field is empty or placeholder"
+            fi
+
+            if [[ -z "$deps" || "$deps" == "{dependencies}" ]]; then
+              error "Dependencies field is empty or placeholder"
+            fi
+
+            # Check required sections
+            for section in "${REQUIRED_SECTIONS[@]}"; do
+              if ! grep -qE "^## ${section}" "$file"; then
+                error "Missing required section: ## ${section}"
+              fi
+            done
+
+            # Check sections have content (not just heading + blank)
+            for section in "${REQUIRED_SECTIONS[@]}"; do
+              local section_line
+              section_line=$(grep -nE "^## ${section}" "$file" | head -1 | cut -d: -f1 || echo "")
+              if [[ -n "$section_line" ]]; then
+                local next_content
+                next_content=$(tail -n +"$((section_line + 1))" "$file" | grep -m1 -cE '^[^#$].*[^ ]' || echo "0")
+                if [[ "$next_content" == "0" ]]; then
+                  warn "Section '## ${section}' appears to have no content"
+                fi
+              fi
+            done
+
+            # Validate dependency references point to known proposals
+            if [[ "$deps" != "None" && "$deps" != "none" ]]; then
+              local known_proposals=()
+              for f in "$PROPOSALS_DIR"/*.md; do
+                local bn
+                bn=$(basename "$f" .md)
+                if [[ "$bn" != "TEMPLATE" ]]; then
+                  known_proposals+=("$bn")
+                fi
+              done
+
+              local dep_refs
+              dep_refs=$(echo "$deps" | grep -oE '`[^`]+`' | tr -d '`' || echo "")
+              for dep in $dep_refs; do
+                local found=false
+                for known in "${known_proposals[@]}"; do
+                  if [[ "$known" == "$dep" ]]; then
+                    found=true
+                    break
+                  fi
+                done
+                if [[ "$found" == "false" ]]; then
+                  if ! echo "$dep" | grep -qiE '^phase'; then
+                    warn "Dependency '$dep' does not match any known proposal filename"
+                  fi
+                fi
+              done
+            fi
+
+            # Check for common convention violations
+            if grep -qi 'mcp.*crm\|crm.*mcp' "$file" 2>/dev/null; then
+              if ! grep -qi 'sync\|external\|pipedrive\|hubspot\|salesforce' "$file" 2>/dev/null; then
+                warn "Possible MCP reference for CRM tools (CRM tools should be native Zig VTable, not MCP)"
+              fi
+            fi
+          }
+
+          echo "=== OpenSpec Proposal Validation ==="
+          echo ""
+
+          if [[ ! -d "$PROPOSALS_DIR" ]]; then
+            echo "::error::$PROPOSALS_DIR directory not found"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          proposal_files=("$PROPOSALS_DIR"/*.md)
+          shopt -u nullglob
+
+          if [[ ${#proposal_files[@]} -eq 0 ]]; then
+            echo "No proposal files found in $PROPOSALS_DIR"
+            exit 0
+          fi
+
+          for file in "${proposal_files[@]}"; do
+            validate_proposal "$file"
+            echo ""
+          done
+
+          echo "=== Results ==="
+          echo "Proposals checked: $CHECKED"
+          echo "Errors: $ERRORS"
+
+          if [[ $ERRORS -gt 0 ]]; then
+            echo ""
+            echo "::error::FAILED: $ERRORS error(s) found."
+            exit 1
+          else
+            echo ""
+            echo "PASSED: All proposals are valid."
+            exit 0
+          fi
