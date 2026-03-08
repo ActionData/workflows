@@ -3,11 +3,11 @@ name: Validate OpenSpec Proposals
 on:
   workflow_call:
     inputs:
-      proposals_dir:
-        description: 'Path to proposals directory'
+      changes_dir:
+        description: 'Path to OpenSpec changes directory'
         required: false
         type: string
-        default: 'docs/proposals'
+        default: 'openspec/changes'
 
 jobs:
   validate:
@@ -17,28 +17,19 @@ jobs:
 
       - name: Validate OpenSpec proposals
         env:
-          PROPOSALS_DIR: ${{ inputs.proposals_dir }}
+          CHANGES_DIR: ${{ inputs.changes_dir }}
         run: |
           set -euo pipefail
 
           ERRORS=0
           CHECKED=0
 
-          # Required sections (## headings) every proposal must have
+          # Required sections (## headings) every proposal must have (OpenSpec v1.2.0)
           REQUIRED_SECTIONS=(
-            "Summary"
-            "Motivation"
-            "Detailed Design"
-            "Integration Points"
-            "Testing Strategy"
-            "Migration / Rollback"
-            "References"
-          )
-
-          REQUIRED_META=(
-            "Phase:"
-            "Specs Affected:"
-            "Dependencies:"
+            "Why"
+            "What Changes"
+            "Capabilities"
+            "Impact"
           )
 
           error() {
@@ -52,47 +43,17 @@ jobs:
 
           validate_proposal() {
             local file="$1"
-            local filename
-            filename=$(basename "$file")
+            local change_name
+            change_name=$(basename "$(dirname "$file")")
             CURRENT_FILE="$file"
 
-            echo "Checking $filename..."
-
-            if [[ "$filename" == "TEMPLATE.md" ]]; then
-              echo "  Skipped (template)"
-              return
-            fi
+            echo "Checking $change_name/proposal.md..."
 
             CHECKED=$((CHECKED + 1))
 
-            # Check title line
-            if ! head -1 "$file" | grep -qE '^# OpenSpec Proposal: `.+`'; then
-              error "Missing or malformed title. Expected: # OpenSpec Proposal: \`proposal-name\`"
-            fi
-
-            # Check required metadata
-            for meta in "${REQUIRED_META[@]}"; do
-              if ! grep -qF "**${meta}**" "$file"; then
-                error "Missing metadata field: ${meta}"
-              fi
-            done
-
-            # Extract metadata values (portable — no grep -P)
-            local phase specs deps
-            phase=$(sed -n 's/^\*\*Phase:\*\* *//p' "$file" | head -1)
-            specs=$(sed -n 's/^\*\*Specs Affected:\*\* *//p' "$file" | head -1)
-            deps=$(sed -n 's/^\*\*Dependencies:\*\* *//p' "$file" | head -1)
-
-            if [[ -z "$phase" || "$phase" == "{phase}" ]]; then
-              error "Phase field is empty or placeholder"
-            fi
-
-            if [[ -z "$specs" || "$specs" == "{specs}" ]]; then
-              error "Specs Affected field is empty or placeholder"
-            fi
-
-            if [[ -z "$deps" || "$deps" == "{dependencies}" ]]; then
-              error "Dependencies field is empty or placeholder"
+            # Check title line (# proposal-name)
+            if ! head -1 "$file" | grep -qE '^# .+'; then
+              error "Missing title. Expected: # proposal-name"
             fi
 
             # Check required sections
@@ -115,35 +76,6 @@ jobs:
               fi
             done
 
-            # Validate dependency references point to known proposals
-            if [[ "$deps" != "None" && "$deps" != "none" ]]; then
-              local known_proposals=()
-              for f in "$PROPOSALS_DIR"/*.md; do
-                local bn
-                bn=$(basename "$f" .md)
-                if [[ "$bn" != "TEMPLATE" ]]; then
-                  known_proposals+=("$bn")
-                fi
-              done
-
-              local dep_refs
-              dep_refs=$(echo "$deps" | grep -oE '`[^`]+`' | tr -d '`' || echo "")
-              for dep in $dep_refs; do
-                local found=false
-                for known in "${known_proposals[@]}"; do
-                  if [[ "$known" == "$dep" ]]; then
-                    found=true
-                    break
-                  fi
-                done
-                if [[ "$found" == "false" ]]; then
-                  if ! echo "$dep" | grep -qiE '^phase'; then
-                    warn "Dependency '$dep' does not match any known proposal filename"
-                  fi
-                fi
-              done
-            fi
-
             # Check for common convention violations
             if grep -qi 'mcp.*crm\|crm.*mcp' "$file" 2>/dev/null; then
               if ! grep -qi 'sync\|external\|pipedrive\|hubspot\|salesforce' "$file" 2>/dev/null; then
@@ -155,17 +87,16 @@ jobs:
           echo "=== OpenSpec Proposal Validation ==="
           echo ""
 
-          if [[ ! -d "$PROPOSALS_DIR" ]]; then
-            echo "::error::$PROPOSALS_DIR directory not found"
+          if [[ ! -d "$CHANGES_DIR" ]]; then
+            echo "::error::$CHANGES_DIR directory not found"
             exit 1
           fi
 
-          shopt -s nullglob
-          proposal_files=("$PROPOSALS_DIR"/*.md)
-          shopt -u nullglob
+          # Find all proposal.md files in active and archived changes
+          mapfile -t proposal_files < <(find "$CHANGES_DIR" -name "proposal.md" | sort)
 
           if [[ ${#proposal_files[@]} -eq 0 ]]; then
-            echo "No proposal files found in $PROPOSALS_DIR"
+            echo "No proposal files found in $CHANGES_DIR"
             exit 0
           fi
 
